@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"os" // DIAG: for stderr logging of ProtocolViolation triggers — remove after bug confirmed.
 	"reflect"
 	"slices"
 	"sync"
@@ -1412,6 +1413,11 @@ func (c *Conn) handleUnpackError(err error, p receivedPacket, pt qlog.PacketType
 		c.tryQueueingUndecryptablePacket(p, pt, datagramID)
 		return true, nil
 	case wire.ErrInvalidReservedBits:
+		// DIAG (jsh088 / 2026-05-13): packet header had reserved bits != 0
+		// after decryption. Remove after bug confirmed.
+		fmt.Fprintf(os.Stderr,
+			"[QUIC-DIAG-RESERVED-BITS] invalid reserved bits: pktType=%s datagramID=%d dataLen=%d err=%v\n",
+			pt, datagramID, len(p.data), err)
 		return false, &qerr.TransportError{
 			ErrorCode:    qerr.ProtocolViolation,
 			ErrorMessage: err.Error(),
@@ -2075,6 +2081,11 @@ func (c *Conn) handlePathResponseFrameClient(f *wire.PathResponseFrame) error {
 func (c *Conn) handlePathResponseFrameServer(f *wire.PathResponseFrame) error {
 	if c.pathManager == nil {
 		// since we didn't send PATH_CHALLENGEs yet, we don't expect PATH_RESPONSEs
+		// DIAG (jsh088 / 2026-05-13): Chrome sent PATH_RESPONSE without
+		// matching PATH_CHALLENGE. Remove after bug confirmed.
+		fmt.Fprintf(os.Stderr,
+			"[QUIC-DIAG-PATH-RESPONSE-SERVER] unexpected PATH_RESPONSE: data=%x\n",
+			f.Data)
 		return &qerr.TransportError{
 			ErrorCode:    qerr.ProtocolViolation,
 			ErrorMessage: "unexpected PATH_RESPONSE frame",
@@ -2086,6 +2097,11 @@ func (c *Conn) handlePathResponseFrameServer(f *wire.PathResponseFrame) error {
 
 func (c *Conn) handleNewTokenFrame(frame *wire.NewTokenFrame) error {
 	if c.perspective == protocol.PerspectiveServer {
+		// DIAG (jsh088 / 2026-05-13): Chrome sent NEW_TOKEN (server-only frame).
+		// Remove after bug confirmed.
+		fmt.Fprintf(os.Stderr,
+			"[QUIC-DIAG-NEW-TOKEN-FROM-CLIENT] tokenLen=%d\n",
+			len(frame.Token))
 		return &qerr.TransportError{
 			ErrorCode:    qerr.ProtocolViolation,
 			ErrorMessage: "received NEW_TOKEN frame from the client",
@@ -2099,6 +2115,11 @@ func (c *Conn) handleNewTokenFrame(frame *wire.NewTokenFrame) error {
 
 func (c *Conn) handleHandshakeDoneFrame(rcvTime monotime.Time) error {
 	if c.perspective == protocol.PerspectiveServer {
+		// DIAG (jsh088 / 2026-05-13): Chrome sent HANDSHAKE_DONE (server-only).
+		// Remove after bug confirmed.
+		fmt.Fprintf(os.Stderr,
+			"[QUIC-DIAG-HANDSHAKE-DONE-FROM-CLIENT] rcvTime=%v\n",
+			rcvTime)
 		return &qerr.TransportError{
 			ErrorCode:    qerr.ProtocolViolation,
 			ErrorMessage: "received a HANDSHAKE_DONE frame",
@@ -2138,6 +2159,11 @@ func (c *Conn) handleAckFrame(frame *wire.AckFrame, encLevel protocol.Encryption
 
 func (c *Conn) handleDatagramFrame(f *wire.DatagramFrame) error {
 	if f.Length(c.version) > wire.MaxDatagramSize {
+		// DIAG (jsh088 / 2026-05-13): Chrome sent DATAGRAM frame exceeding limit.
+		// Remove after bug confirmed.
+		fmt.Fprintf(os.Stderr,
+			"[QUIC-DIAG-DATAGRAM-TOO-LARGE] dataLen=%d maxAllowed=%d\n",
+			f.Length(c.version), wire.MaxDatagramSize)
 		return &qerr.TransportError{
 			ErrorCode:    qerr.ProtocolViolation,
 			ErrorMessage: "DATAGRAM frame too large",

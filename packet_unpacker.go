@@ -2,6 +2,7 @@ package quic
 
 import (
 	"fmt"
+	"os" // DIAG: for stderr logging of ProtocolViolation triggers — remove after bug confirmed.
 
 	"github.com/quic-go/quic-go/internal/handshake"
 	"github.com/quic-go/quic-go/internal/monotime"
@@ -93,6 +94,11 @@ func (u *packetUnpacker) UnpackLongHeader(hdr *wire.Header, data []byte) (*unpac
 	}
 
 	if len(decrypted) == 0 {
+		// DIAG (jsh088 / 2026-05-13): identify which empty-packet check fires
+		// for Chrome 145+ on miramesaally.org. Remove after bug confirmed.
+		fmt.Fprintf(os.Stderr,
+			"[QUIC-DIAG-EMPTY-LONG] empty long-header packet decrypted: encLevel=%s pktType=%s pktNum=%d origDataLen=%d\n",
+			encLevel, hdr.Type, extHdr.PacketNumber, len(data))
 		return nil, &qerr.TransportError{
 			ErrorCode:    qerr.ProtocolViolation,
 			ErrorMessage: "empty packet",
@@ -116,6 +122,12 @@ func (u *packetUnpacker) UnpackShortHeader(rcvTime monotime.Time, data []byte) (
 		return 0, 0, 0, nil, err
 	}
 	if len(decrypted) == 0 {
+		// DIAG (jsh088 / 2026-05-13): identify which empty-packet check fires
+		// for Chrome 145+ on miramesaally.org. This is the 1-RTT short-header
+		// case — most likely candidate for the bug. Remove after confirmed.
+		fmt.Fprintf(os.Stderr,
+			"[QUIC-DIAG-EMPTY-SHORT] empty short-header packet decrypted: pktNum=%d pnLen=%d keyPhase=%d origDataLen=%d rcvTime=%v\n",
+			pn, pnLen, kp, len(data), rcvTime)
 		return 0, 0, 0, nil, &qerr.TransportError{
 			ErrorCode:    qerr.ProtocolViolation,
 			ErrorMessage: "empty packet",
