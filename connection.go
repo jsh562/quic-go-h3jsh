@@ -10,6 +10,7 @@ import (
 	"net"
 	"os" // DIAG: for stderr logging of ProtocolViolation triggers — remove after bug confirmed.
 	"reflect"
+	"runtime/debug" // DIAG: for stack trace in close-decision logging — remove after bug confirmed.
 	"slices"
 	"sync"
 	"sync/atomic"
@@ -2174,6 +2175,18 @@ func (c *Conn) handleDatagramFrame(f *wire.DatagramFrame) error {
 }
 
 func (c *Conn) setCloseError(e *closeError) {
+	// DIAG (jsh088 / 2026-05-13): EVERY connection close funnels through here
+	// regardless of cause (frame error, transport error, app close, idle
+	// timeout, destroy(), etc.). Log the error + stack trace so we can find
+	// which code path is closing the connection serving Chrome 146.
+	// Logs only on the FIRST close cause (subsequent CompareAndSwap fails);
+	// race on the Load is acceptable — worst case is duplicate log lines.
+	// Remove after bug confirmed.
+	if c.closeErr.Load() == nil {
+		fmt.Fprintf(os.Stderr,
+			"[QUIC-DIAG-CLOSE] perspective=%s immediate=%v err=%v\n[QUIC-DIAG-CLOSE-STACK]\n%s[QUIC-DIAG-CLOSE-END]\n",
+			c.perspective, e.immediate, e.err, debug.Stack())
+	}
 	c.closeErr.CompareAndSwap(nil, e)
 	select {
 	case c.closeChan <- struct{}{}:
