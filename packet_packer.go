@@ -146,7 +146,7 @@ type packetPacker struct {
 	// us "what server sent right before Chrome closed", which pinpoints
 	// the trigger frame/pattern Chrome rejected. Remove after bug
 	// confirmed. ~3KB of memory per connection; negligible.
-	diagFrameBuf    [32]string
+	diagFrameBuf    [128]string
 	diagFrameBufIdx int
 	diagFrameBufMu  sync.Mutex
 }
@@ -1061,8 +1061,19 @@ func (p *packetPacker) diagRecordPayload(hdrType string, pn protocol.PacketNumbe
 
 	p.diagFrameBufMu.Lock()
 	p.diagFrameBuf[p.diagFrameBufIdx] = entry
-	p.diagFrameBufIdx = (p.diagFrameBufIdx + 1) % 32
+	p.diagFrameBufIdx = (p.diagFrameBufIdx + 1) % 128
 	p.diagFrameBufMu.Unlock()
+
+	// DIAG (jsh088 / 2026-05-14): always-log every outgoing packet's
+	// encryption level + packet number to stderr. Lets us scan the
+	// docker logs and verify there are NO late Initial/Handshake
+	// packets after 1-RTT data starts flowing — Chrome's earlier
+	// DROPPED_UNDECRYPTABLE_PACKET events at Initial/Handshake levels
+	// would indicate quic-go is retransmitting Initial/Handshake
+	// packets after Chrome dropped those keys (per RFC 9001).
+	fmt.Fprintf(os.Stderr,
+		"[QUIC-DIAG-PKT] hdrType=%s pkt=%d totalLen=%d\n",
+		hdrType, pn, pl.length)
 }
 
 // DiagDumpRecentFrames writes the circular buffer (oldest entry first) to
@@ -1072,15 +1083,15 @@ func (p *packetPacker) DiagDumpRecentFrames(dstConnID string) {
 	p.diagFrameBufMu.Lock()
 	defer p.diagFrameBufMu.Unlock()
 	fmt.Fprintf(os.Stderr,
-		"[QUIC-DIAG-FRAME-BUFFER] dst=%s — last 32 packets sent (oldest first):\n",
+		"[QUIC-DIAG-FRAME-BUFFER] dst=%s — last 128 packets sent (oldest first):\n",
 		dstConnID)
 	// Oldest entry is at diagFrameBufIdx (next-write slot); walk forward.
-	for i := 0; i < 32; i++ {
-		idx := (p.diagFrameBufIdx + i) % 32
+	for i := 0; i < 128; i++ {
+		idx := (p.diagFrameBufIdx + i) % 128
 		if p.diagFrameBuf[idx] == "" {
-			continue // unfilled slot — fewer than 32 packets sent yet
+			continue // unfilled slot — fewer than 128 packets sent yet
 		}
-		fmt.Fprintf(os.Stderr, "  %d: %s\n", i-31, p.diagFrameBuf[idx])
+		fmt.Fprintf(os.Stderr, "  %d: %s\n", i-127, p.diagFrameBuf[idx])
 	}
 	fmt.Fprintf(os.Stderr, "[QUIC-DIAG-FRAME-BUFFER-END]\n")
 }
