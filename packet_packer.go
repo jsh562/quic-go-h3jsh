@@ -1045,8 +1045,8 @@ func (emptyHandler) OnLost(wire.Frame)  {}
 func (p *packetPacker) diagRecordPayload(hdrType string, pn protocol.PacketNumber, pl payload) {
 	parts := make([]string, 0, 4+len(pl.streamFrames)+len(pl.frames))
 	if pl.ack != nil {
-		parts = append(parts, fmt.Sprintf("ACK(smallest=%d,largest=%d)",
-			pl.ack.SmallestAcked(), pl.ack.LargestAcked()))
+		parts = append(parts, fmt.Sprintf("ACK(lowest=%d,largest=%d)",
+			pl.ack.LowestAcked(), pl.ack.LargestAcked()))
 	}
 	for _, sf := range pl.streamFrames {
 		f := sf.Frame
