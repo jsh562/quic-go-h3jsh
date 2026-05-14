@@ -8,6 +8,8 @@ import (
 	"math/rand/v2"
 	"os"            // DIAG: for stderr logging of outgoing CONNECTION_CLOSE.
 	"runtime/debug" // DIAG: for stack trace at outgoing-close pack site.
+	"strings"       // DIAG: for joining frame descriptions in the outgoing-frame buffer.
+	"sync"          // DIAG: for outgoing-frame circular buffer mutex.
 
 	"github.com/quic-go/quic-go/internal/ackhandler"
 	"github.com/quic-go/quic-go/internal/handshake"
@@ -137,6 +139,16 @@ type packetPacker struct {
 	rand                rand.Rand
 
 	numNonAckElicitingAcks int
+
+	// DIAG (jsh088 / 2026-05-13): circular buffer of last 32 packet
+	// summaries this packer has built. Dumped by setCloseError in
+	// connection.go when a (remote) CONNECTION_CLOSE is received — gives
+	// us "what server sent right before Chrome closed", which pinpoints
+	// the trigger frame/pattern Chrome rejected. Remove after bug
+	// confirmed. ~3KB of memory per connection; negligible.
+	diagFrameBuf    [32]string
+	diagFrameBufIdx int
+	diagFrameBufMu  sync.Mutex
 }
 
 var _ packer = &packetPacker{}
@@ -870,6 +882,7 @@ func (p *packetPacker) getLongHeader(encLevel protocol.EncryptionLevel, v protoc
 }
 
 func (p *packetPacker) appendLongHeaderPacket(buffer *packetBuffer, header *wire.ExtendedHeader, pl payload, padding protocol.ByteCount, encLevel protocol.EncryptionLevel, sealer sealer, v protocol.Version) (*longHeaderPacket, error) {
+	p.diagRecordPayload(fmt.Sprintf("LONG-%s", encLevel), header.PacketNumber, pl)
 	var paddingLen protocol.ByteCount
 	pnLen := protocol.ByteCount(header.PacketNumberLen)
 	if pl.length < 4-pnLen {
@@ -917,6 +930,7 @@ func (p *packetPacker) appendShortHeaderPacket(
 	isMTUProbePacket bool,
 	v protocol.Version,
 ) (shortHeaderPacket, error) {
+	p.diagRecordPayload("SHORT-1RTT", pn, pl)
 	var paddingLen protocol.ByteCount
 	if pl.length < 4-protocol.ByteCount(pnLen) {
 		paddingLen = 4 - protocol.ByteCount(pnLen) - pl.length
@@ -1018,3 +1032,55 @@ var _ ackhandler.FrameHandler = emptyHandler{}
 
 func (emptyHandler) OnAcked(wire.Frame) {}
 func (emptyHandler) OnLost(wire.Frame)  {}
+
+// ─── DIAG: outgoing frame instrumentation (jsh088 / 2026-05-13) ───────────
+// Record a single-line summary of every outgoing packet the packer builds
+// into a per-connection circular buffer. When connection.go's setCloseError
+// fires with Remote=true, it dumps the buffer to stderr so we can identify
+// which frame/pattern Chrome's QUIC stack rejected. Remove after bug
+// confirmed.
+
+// diagRecordPayload formats and stores a one-line description of all frames
+// in `pl` plus the packet number + header type. Called from append*HeaderPacket.
+func (p *packetPacker) diagRecordPayload(hdrType string, pn protocol.PacketNumber, pl payload) {
+	parts := make([]string, 0, 4+len(pl.streamFrames)+len(pl.frames))
+	if pl.ack != nil {
+		parts = append(parts, fmt.Sprintf("ACK(smallest=%d,largest=%d)",
+			pl.ack.SmallestAcked(), pl.ack.LargestAcked()))
+	}
+	for _, sf := range pl.streamFrames {
+		f := sf.Frame
+		parts = append(parts, fmt.Sprintf("STREAM(id=%d,off=%d,len=%d,fin=%v)",
+			f.StreamID, f.Offset, len(f.Data), f.Fin))
+	}
+	for _, fr := range pl.frames {
+		parts = append(parts, fmt.Sprintf("%T", fr.Frame))
+	}
+	entry := fmt.Sprintf("%s pkt=%d totalLen=%d frames=[%s]",
+		hdrType, pn, pl.length, strings.Join(parts, ","))
+
+	p.diagFrameBufMu.Lock()
+	p.diagFrameBuf[p.diagFrameBufIdx] = entry
+	p.diagFrameBufIdx = (p.diagFrameBufIdx + 1) % 32
+	p.diagFrameBufMu.Unlock()
+}
+
+// DiagDumpRecentFrames writes the circular buffer (oldest entry first) to
+// stderr. Capitalized so it's exported and callable from connection.go via
+// type assertion of the packer interface to *packetPacker.
+func (p *packetPacker) DiagDumpRecentFrames(dstConnID string) {
+	p.diagFrameBufMu.Lock()
+	defer p.diagFrameBufMu.Unlock()
+	fmt.Fprintf(os.Stderr,
+		"[QUIC-DIAG-FRAME-BUFFER] dst=%s — last 32 packets sent (oldest first):\n",
+		dstConnID)
+	// Oldest entry is at diagFrameBufIdx (next-write slot); walk forward.
+	for i := 0; i < 32; i++ {
+		idx := (p.diagFrameBufIdx + i) % 32
+		if p.diagFrameBuf[idx] == "" {
+			continue // unfilled slot — fewer than 32 packets sent yet
+		}
+		fmt.Fprintf(os.Stderr, "  %d: %s\n", i-31, p.diagFrameBuf[idx])
+	}
+	fmt.Fprintf(os.Stderr, "[QUIC-DIAG-FRAME-BUFFER-END]\n")
+}

@@ -2184,8 +2184,26 @@ func (c *Conn) setCloseError(e *closeError) {
 	// Remove after bug confirmed.
 	if c.closeErr.Load() == nil {
 		fmt.Fprintf(os.Stderr,
-			"[QUIC-DIAG-CLOSE] perspective=%s immediate=%v err=%v\n[QUIC-DIAG-CLOSE-STACK]\n%s[QUIC-DIAG-CLOSE-END]\n",
-			c.perspective, e.immediate, e.err, debug.Stack())
+			"[QUIC-DIAG-CLOSE] perspective=%s immediate=%v err=%v\n",
+			c.perspective, e.immediate, e.err)
+		// DIAG (jsh088 / 2026-05-13): if this close came FROM the peer
+		// (Remote=true), dump the last 32 packets WE sent. Identifies the
+		// trigger frame/pattern that caused Chrome to send its CONNECTION_CLOSE.
+		// Only the packetPacker holds the buffer; type-assert to access it.
+		isRemoteClose := false
+		if te, ok := e.err.(*qerr.TransportError); ok && te.Remote {
+			isRemoteClose = true
+		} else if ae, ok := e.err.(*qerr.ApplicationError); ok && ae.Remote {
+			isRemoteClose = true
+		}
+		if isRemoteClose {
+			if pp, ok := c.packer.(*packetPacker); ok {
+				pp.DiagDumpRecentFrames(c.handshakeDestConnID.String())
+			}
+		}
+		fmt.Fprintf(os.Stderr,
+			"[QUIC-DIAG-CLOSE-STACK]\n%s[QUIC-DIAG-CLOSE-END]\n",
+			debug.Stack())
 	}
 	c.closeErr.CompareAndSwap(nil, e)
 	select {
