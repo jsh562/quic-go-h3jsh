@@ -6,6 +6,8 @@ import (
 	"errors"
 	"fmt"
 	"math/rand/v2"
+	"os"            // DIAG: for stderr logging of outgoing CONNECTION_CLOSE.
+	"runtime/debug" // DIAG: for stack trace at outgoing-close pack site.
 
 	"github.com/quic-go/quic-go/internal/ackhandler"
 	"github.com/quic-go/quic-go/internal/handshake"
@@ -194,6 +196,15 @@ func (p *packetPacker) packConnectionClose(
 	maxPacketSize protocol.ByteCount,
 	v protocol.Version,
 ) (*coalescedPacket, error) {
+	// DIAG (jsh088 / 2026-05-13): EVERY outgoing CONNECTION_CLOSE frame is
+	// built here. Log the error context + full stack trace so we identify
+	// which code path in quic-go decided to close Chrome. Pairs with the
+	// setCloseError DIAG in connection.go — together they catch BOTH
+	// directions: setCloseError catches incoming closes (Remote=true), this
+	// catches outgoing closes (we initiated). Remove after bug confirmed.
+	fmt.Fprintf(os.Stderr,
+		"[QUIC-DIAG-PACK-CLOSE] sending CONNECTION_CLOSE: isAppErr=%v errCode=0x%x frameType=0x%x reason=%q maxPkt=%d v=%v\n[QUIC-DIAG-PACK-CLOSE-STACK]\n%s[QUIC-DIAG-PACK-CLOSE-END]\n",
+		isApplicationError, errorCode, frameType, reason, maxPacketSize, v, debug.Stack())
 	var sealers [4]sealer
 	var hdrs [3]*wire.ExtendedHeader
 	var payloads [4]payload
